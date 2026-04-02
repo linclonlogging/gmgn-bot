@@ -14,6 +14,7 @@ Run:
 import time
 import logging
 import random
+from collections import deque
 
 try:
     import cloudscraper
@@ -35,6 +36,10 @@ POLL_INTERVAL = 60     # seconds between polls
 TIME_PERIOD   = "1m"   # trending window: 1m | 5m | 1h | 6h | 24h
 ORDER_BY      = "swaps"
 
+# Volume SMA: at 60s per poll, 5 readings = 5 minutes
+VOL_SMA_PERIODS = 5        # number of readings to average
+VOL_SMA_MIN     = 3_500    # minimum SMA ($3.5K) to pass
+
 # ─────────────────────────────────────────────
 #  FILTERS  (set any value to None to disable)
 # ─────────────────────────────────────────────
@@ -42,7 +47,7 @@ ORDER_BY      = "swaps"
 FILTERS = {
 
     # ── GMGN metric flags (True = required) ──────────────────────────────
-    "require_no_mint":           True,   # NoMint
+    "require_no_mint":           True,
     "require_not_migrated":      False,
     "require_migrated":          False,
     "require_burnt":             False,
@@ -52,7 +57,7 @@ FILTERS = {
 
     # ── Age ──────────────────────────────────────────────────────────────
     "min_age_days":              None,
-    "max_age_days":              2,      # max 2 days old
+    "max_age_days":              2,
 
     # ── Liquidity (USD) ──────────────────────────────────────────────────
     "min_liquidity":             None,
@@ -65,10 +70,6 @@ FILTERS = {
     # ── ATH Market Cap (USD) ─────────────────────────────────────────────
     "min_ath_market_cap":        None,
     "max_ath_market_cap":        None,
-
-    # ── 1m Volume (USD) ──────────────────────────────────────────────────
-    "min_1m_volume":             3_000,  # $3K min
-    "max_1m_volume":             None,
 
     # ── 1m Transactions ──────────────────────────────────────────────────
     "min_1m_txs":                None,
@@ -98,9 +99,7 @@ FILTERS = {
     "api_filters":               ["not_honeypot"],
 }
 
-# A token won't re-alert for this many minutes after being notified
 ALERT_COOLDOWN_MINUTES = 60
-
 MAX_ALERTS_PER_CYCLE   = 5
 
 # ─────────────────────────────────────────────
@@ -113,6 +112,25 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("gmgn_bot")
+
+# ─────────────────────────────────────────────
+#  VOLUME HISTORY
+#  Tracks last N volume readings per token
+#  so we can compute a rolling SMA
+# ─────────────────────────────────────────────
+
+# {address: deque([vol1, vol2, ...], maxlen=VOL_SMA_PERIODS)}
+vol_history: dict[str, deque] = {}
+
+def record_volume(address: str, volume: float):
+    """Store reading and return (sma, readings_count). sma is None if not enough data yet."""
+    if address not in vol_history:
+        vol_history[address] = deque(maxlen=VOL_SMA_PERIODS)
+    vol_history[address].append(volume)
+    readings = vol_history[address]
+    if len(readings) < VOL_SMA_PERIODS:
+        return None, len(readings)
+    return sum(readings) / len(readings), len(readings)
 
 # ─────────────────────────────────────────────
 #  CLOUDSCRAPER SESSION
@@ -178,23 +196,24 @@ def passes_filters(token: dict) -> tuple[bool, list[str]]:
     f       = FILTERS
     reasons = []
     sym     = token.get("symbol", "???")
+    address = token.get("address", "")
 
-    volume        = token.get("volume") or 0
-    liquidity     = token.get("liquidity") or 0
-    market_cap    = token.get("market_cap") or 0
-    ath_mc        = token.get("ath") or 0
-    swaps         = token.get("swaps") or 0
-    kol_count     = token.get("renowned_count") or 0
-    smart_count   = token.get("smart_degen_count") or 0
-    holders       = token.get("holder_count") or 0
-    top10_pct     = (token.get("top_10_holder_rate") or 0) * 100
-    dev_pct       = (token.get("dev_token_burn_ratio") or 0) * 100
-    price_chg     = token.get("price_change_percent") or 0
-    mintable      = token.get("mintable")
-    is_migrated   = token.get("is_migrated")
-    burn_status   = token.get("burn_status")
-    open_ts       = token.get("open_timestamp")
-    age_days      = (time.time() - open_ts) / 86_400 if open_ts else None
+    volume      = token.get("volume") or 0
+    liquidity   = token.get("liquidity") or 0
+    market_cap  = token.get("market_cap") or 0
+    ath_mc      = token.get("ath") or 0
+    swaps       = token.get("swaps") or 0
+    kol_count   = token.get("renowned_count") or 0
+    smart_count = token.get("smart_degen_count") or 0
+    holders     = token.get("holder_count") or 0
+    top10_pct   = (token.get("top_10_holder_rate") or 0) * 100
+    dev_pct     = (token.get("dev_token_burn_ratio") or 0) * 100
+    price_chg   = token.get("price_change_percent") or 0
+    mintable    = token.get("mintable")
+    is_migrated = token.get("is_migrated")
+    burn_status = token.get("burn_status")
+    open_ts     = token.get("open_timestamp")
+    age_days    = (time.time() - open_ts) / 86_400 if open_ts else None
 
     # Boolean flags
     if f["require_no_mint"] and mintable:
@@ -213,10 +232,15 @@ def passes_filters(token: dict) -> tuple[bool, list[str]]:
         label = f"{age_days*24:.1f}h old" if age_days < 1 else f"{age_days:.1f}d old"
         reasons.append(label)
 
-    # Volume
-    if not _in_range(volume, f["min_1m_volume"], f["max_1m_volume"]):
-        log.debug("FAIL vol=%.0f | %s", volume, sym); return False, []
-    reasons.append(f"Vol ${volume:,.0f}")
+    # Volume SMA (5 min) — record every cycle regardless, only pass once we have enough data
+    vol_sma, readings = record_volume(address, volume)
+    if vol_sma is None:
+        log.debug("FAIL SMA building (%d/%d, cur=$%.0f) | %s", readings, VOL_SMA_PERIODS, volume, sym)
+        return False, []
+    if vol_sma < VOL_SMA_MIN:
+        log.debug("FAIL SMA=%.0f < %.0f | %s", vol_sma, VOL_SMA_MIN, sym)
+        return False, []
+    reasons.append(f"5m SMA ${vol_sma:,.0f}")
 
     # Liquidity
     if not _in_range(liquidity, f["min_liquidity"], f["max_liquidity"]):
@@ -280,8 +304,8 @@ def send_alert(token: dict, reasons: list[str]) -> bool:
     gmgn_link = f"https://gmgn.ai/sol/token/{address}"
     dex_link  = f"https://dexscreener.com/solana/{address}"
 
-    title    = f"${symbol} — GMGN trending"
-    message  = (
+    title   = f"${symbol} — GMGN trending"
+    message = (
         f"{' | '.join(reasons)}\n"
         f"Price: ${price:.8g}\n"
         f"GMGN: {gmgn_link}\n"
@@ -316,13 +340,13 @@ def main():
     log.info("=" * 55)
     log.info("GMGN Alert Bot started")
     log.info("Chain: %s | Period: %s | Poll every %ds", CHAIN, TIME_PERIOD, POLL_INTERVAL)
-    log.info("Filters: Vol >$%s | KOL >=%s | Smart >=%s | Max age %sd",
-             FILTERS["min_1m_volume"], FILTERS["min_kol"],
-             FILTERS["min_smart"], FILTERS["max_age_days"])
+    log.info("Vol SMA: >=$%.0f over %d readings (5 min)", VOL_SMA_MIN, VOL_SMA_PERIODS)
+    log.info("Filters: KOL >=%s | Smart >=%s | Max age %sd",
+             FILTERS["min_kol"], FILTERS["min_smart"], FILTERS["max_age_days"])
     log.info("Notifying: %s", NTFY_URL)
+    log.info("Note: first alert per token needs %d poll cycles to build SMA", VOL_SMA_PERIODS)
     log.info("=" * 55)
 
-    # {address: unix timestamp of last alert}
     alerted: dict[str, float] = {}
     cooldown_secs = ALERT_COOLDOWN_MINUTES * 60
 
@@ -340,7 +364,6 @@ def main():
                 if not address:
                     continue
 
-                # Skip if already alerted within cooldown window
                 if time.time() - alerted.get(address, 0) < cooldown_secs:
                     continue
 
@@ -351,34 +374,42 @@ def main():
                         alerts_this_cycle += 1
                 else:
                     sym      = token.get("symbol", "???")
-                    vol      = token.get("volume") or 0
                     kol      = token.get("renowned_count") or 0
                     smart    = token.get("smart_degen_count") or 0
                     open_ts  = token.get("open_timestamp")
                     age_days = (time.time() - open_ts) / 86_400 if open_ts else None
                     pchg     = token.get("price_change_percent") or 0
+                    hist     = vol_history.get(address)
+                    sma      = sum(hist) / len(hist) if hist else 0
+                    readings = len(hist) if hist else 0
 
                     score = 0
-                    if vol   >= (FILTERS["min_1m_volume"] or 0): score += 1
-                    if kol   >= (FILTERS["min_kol"] or 0):       score += 1
-                    if smart >= (FILTERS["min_smart"] or 0):      score += 1
+                    if sma   >= VOL_SMA_MIN:                                                  score += 1
+                    if kol   >= (FILTERS["min_kol"] or 0):                                    score += 1
+                    if smart >= (FILTERS["min_smart"] or 0):                                  score += 1
                     if age_days is not None and age_days <= (FILTERS["max_age_days"] or 999): score += 1
 
-                    near_misses.append((score, sym, vol, kol, smart, age_days, pchg))
+                    near_misses.append((score, sym, sma, readings, kol, smart, age_days, pchg))
 
             if alerts_this_cycle == 0:
                 log.info("No tokens matched filters this cycle")
                 near_misses.sort(key=lambda x: x[0], reverse=True)
-                for score, sym, vol, kol, smart, age_days, pchg in near_misses[:3]:
+                for score, sym, sma, readings, kol, smart, age_days, pchg in near_misses[:3]:
                     age_str = f"{age_days*24:.1f}h" if age_days is not None else "?"
                     log.info(
-                        "  near miss: $%-10s  vol=$%-8.0f  kol=%-2d  smart=%-2d  age=%-6s  %+.1f%%  (%d/4 filters)",
-                        sym, vol, kol, smart, age_str, pchg, score
+                        "  near miss: $%-10s  sma=$%-7.0f (%d/%d)  kol=%-2d  smart=%-2d  age=%-6s  %+.1f%%  (%d/4)",
+                        sym, sma, readings, VOL_SMA_PERIODS, kol, smart, age_str, pchg, score
                     )
 
             # Prune cooldown entries older than 24h
             cutoff = time.time() - 86_400
             alerted = {k: v for k, v in alerted.items() if v > cutoff}
+
+            # Prune vol_history for tokens not seen in 30 min
+            active = {t.get("address") for t in tokens}
+            stale  = [a for a in list(vol_history) if a not in active]
+            for a in stale:
+                del vol_history[a]
 
         except KeyboardInterrupt:
             log.info("Stopped.")

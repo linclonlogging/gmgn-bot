@@ -1,1 +1,1 @@
-worker: python gmgn_alert_bot.py
+worker: python gmgn_alert_bot_main.py

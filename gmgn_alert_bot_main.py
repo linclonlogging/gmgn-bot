@@ -1,7 +1,7 @@
 """
 GMGN Trending Token Alert Bot
 ==============================
-Setup:  pip install cloudscraper requests
+Setup:  pip install curl_cffi
 Run:    python gmgn_alert_bot.py
 """
 
@@ -13,9 +13,9 @@ import threading
 from collections import deque
 
 try:
-    import cloudscraper
+    from curl_cffi import requests as curl_requests
 except ImportError:
-    raise SystemExit("\n[ERROR] Run: pip install cloudscraper\n")
+    raise SystemExit("\n[ERROR] Run: pip install curl_cffi\n")
 
 # ─────────────────────────────────────────────
 #  CONFIG
@@ -128,10 +128,7 @@ def compute_rank(ratio: float) -> float:
 # ─────────────────────────────────────────────
 
 def build_scraper():
-    s = cloudscraper.create_scraper(
-        browser={"browser": "chrome", "platform": "windows", "mobile": False},
-        delay=5,
-    )
+    s = curl_requests.Session(impersonate="chrome120")
     s.headers.update({
         "Accept":          "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",

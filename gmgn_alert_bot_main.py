@@ -32,11 +32,11 @@ ORDER_BY      = "swaps"
 VOL_SMA_PERIODS = 5       # 5 x 1-minute candles
 VOL_SMA_MIN     = 8_000   # $8K average to pass
 
-# Volatility ratio = vol_sma / liquidity — must be >= 1.0x to pass
-MIN_VOL_RATIO = 1.0
+# Volatility ratio = vol_sma / liquidity — must be >= 1.5x to pass
+MIN_VOL_RATIO = 1.5
 
-# Rank scale 0.0–5.0: 1.0x -> 1.0, 10.0x -> 5.0 (linear, capped)
-RANK_LOW_RATIO  = 1.0
+# Rank scale 0.0–5.0: 1.5x -> 1.0, 10.0x -> 5.0 (linear, capped)
+RANK_LOW_RATIO  = 1.5
 RANK_HIGH_RATIO = 10.0
 RANK_LOW        = 1.0
 RANK_HIGH       = 5.0

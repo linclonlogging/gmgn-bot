@@ -30,7 +30,7 @@ TIME_PERIOD   = "1m"
 ORDER_BY      = "swaps"
 
 VOL_SMA_PERIODS = 5       # 5 x 1-minute candles
-VOL_SMA_MIN     = 15_000   # $15K average to pass
+VOL_SMA_MIN     = 20_000   # $20K average to pass
 
 # Volatility ratio = vol_sma / liquidity — must be >= 1.5x to pass
 MIN_VOL_RATIO = 1.5

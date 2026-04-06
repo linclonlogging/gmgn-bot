@@ -41,6 +41,9 @@ RANK_HIGH_RATIO = 10.0
 RANK_LOW        = 1.0
 RANK_HIGH       = 5.0
 
+# Minimum token age in minutes before an alert is sent
+MIN_TOKEN_AGE_MINUTES = 15
+
 # 6 hours — same token won't alert again within this window
 ALERT_COOLDOWN_MINUTES = 360
 
@@ -228,6 +231,13 @@ def passes_filters(token: dict):
     if f["require_burnt"] and not s["burn_status"]:
         log.debug("FAIL burnt | %s", sym); return False, s
 
+    # Minimum token age
+    open_ts = token.get("open_timestamp")
+    if open_ts is not None:
+        age_minutes = (time.time() - open_ts) / 60
+        if age_minutes < MIN_TOKEN_AGE_MINUTES:
+            log.debug("FAIL too new=%.1fmin | %s", age_minutes, sym); return False, s
+
     # Age
     if s["age_days"] is not None and not _in_range(s["age_days"], f["min_age_days"], f["max_age_days"]):
         log.debug("FAIL age=%.2fd | %s", s["age_days"], sym); return False, s
@@ -402,8 +412,8 @@ def main():
     log.info("Vol SMA: >=$%.0f over %d candles | Min ratio: %.1fx",
              VOL_SMA_MIN, VOL_SMA_PERIODS, MIN_VOL_RATIO)
     log.info("Rank: 1.0 = %.1fx | 5.0 = %.1fx", RANK_LOW_RATIO, RANK_HIGH_RATIO)
-    log.info("Filters: KOL >=%s | Smart >=%s | Max age %sd",
-             FILTERS["min_kol"], FILTERS["min_smart"], FILTERS["max_age_days"])
+    log.info("Filters: KOL >=%s | Smart >=%s | Min age %dmin | Max age %sd",
+             FILTERS["min_kol"], FILTERS["min_smart"], MIN_TOKEN_AGE_MINUTES, FILTERS["max_age_days"])
     log.info("Cooldown: %dh per token", ALERT_COOLDOWN_MINUTES // 60)
     log.info("Notifying: %s", NTFY_URL)
     log.info("Paste a token address + Enter to preview. Type 'quit' to stop.")

@@ -154,6 +154,30 @@ def format_launchpad(token: dict) -> str:
         return "Pump.fun"
     return str(launchpad).replace("_", " ").strip().title()
 
+
+def venue_fee_percent(token: dict) -> float | None:
+    """Return the fee percent for a known launch/migration venue, else None."""
+    venue = (token.get("migrated_pool_exchange") or token.get("launchpad_platform") or token.get("launchpad") or "").strip().lower()
+
+    fee_map = {
+        "pump": 1.0,
+        "pump.fun": 1.0,
+        "pump_amm": 1.0,
+        "pool_meteora": 0.0,
+        "meteora": 0.0,
+    }
+
+    return fee_map.get(venue)
+
+
+def format_fee_percent(fee_percent: float | None) -> str | None:
+    """Render a fee percent as a compact alert string."""
+    if fee_percent is None:
+        return None
+    if fee_percent.is_integer():
+        return f"Fee {fee_percent:.0f}%"
+    return f"Fee {fee_percent:.1f}%"
+
 # ─────────────────────────────────────────────
 #  SCRAPER
 # ─────────────────────────────────────────────
@@ -273,6 +297,7 @@ def build_stats(token: dict) -> dict:
         "price_chg":  token.get("price_change_percent") or 0,
         "age_days":   age_seconds / 86_400 if age_seconds is not None else None,
         "launchpad":  format_launchpad(token),
+        "fee_percent": venue_fee_percent(token),
         "mintable":   token.get("mintable"),
         "is_migrated":token.get("is_migrated"),
         "burn_status":token.get("burn_status"),
@@ -367,6 +392,9 @@ def format_notification(token: dict, s: dict) -> tuple[str, str]:
     if s["swaps"]:
         parts.append(f"Swaps {s['swaps']}")
     parts.append(f"LP {s['launchpad']}")
+    fee_text = format_fee_percent(s.get("fee_percent"))
+    if fee_text and token.get("migrated_pool_exchange"):
+        parts.append(fee_text)
     parts += [f"{s['price_chg']:+.1f}%", f"Age {age_str}"]
 
     body = " | ".join(parts) + f"\n{addr}"

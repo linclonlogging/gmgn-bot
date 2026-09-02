@@ -391,6 +391,7 @@ def send_alert(token: dict, stats: dict) -> bool:
 
 def debug_address(address: str):
     """Search all time windows for a token and preview its notification."""
+    global SCRAPER
     address = address.strip()
     print(f"\n  Fetching data for {address} ...")
 
@@ -402,7 +403,8 @@ def debug_address(address: str):
             url = f"https://gmgn.ai/defi/quotation/v1/rank/{CHAIN}/swaps/{period}"
             params = {"orderby": "swaps", "direction": "desc", "filters[]": []}
             time.sleep(1.0)
-            resp = SCRAPER.get(url, params=params, timeout=30)
+            warmup_scraper(SCRAPER)
+            resp, SCRAPER = fetch_gmgn_rank(SCRAPER, url, params)
             resp.raise_for_status()
             tokens = resp.json().get("data", {}).get("rank", [])
             match = next((t for t in tokens if t.get("address") == address), None)

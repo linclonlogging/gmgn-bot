@@ -144,6 +144,16 @@ def token_age_seconds(open_ts) -> float | None:
         open_ts /= 1000
     return now - open_ts
 
+
+def format_launchpad(token: dict) -> str:
+    """Return a human-readable launchpad label for notification display."""
+    launchpad = token.get("launchpad_platform") or token.get("launchpad") or "unknown"
+    if launchpad == "pool_meteora":
+        return "Meteora"
+    if launchpad == "Pump.fun" or launchpad == "pump":
+        return "Pump.fun"
+    return str(launchpad).replace("_", " ").strip().title()
+
 # ─────────────────────────────────────────────
 #  SCRAPER
 # ─────────────────────────────────────────────
@@ -262,6 +272,7 @@ def build_stats(token: dict) -> dict:
         "swaps":      token.get("swaps") or 0,
         "price_chg":  token.get("price_change_percent") or 0,
         "age_days":   age_seconds / 86_400 if age_seconds is not None else None,
+        "launchpad":  format_launchpad(token),
         "mintable":   token.get("mintable"),
         "is_migrated":token.get("is_migrated"),
         "burn_status":token.get("burn_status"),
@@ -355,6 +366,7 @@ def format_notification(token: dict, s: dict) -> tuple[str, str]:
         parts.append(f"Holders {s['holders']}")
     if s["swaps"]:
         parts.append(f"Swaps {s['swaps']}")
+    parts.append(f"LP {s['launchpad']}")
     parts += [f"{s['price_chg']:+.1f}%", f"Age {age_str}"]
 
     body = " | ".join(parts) + f"\n{addr}"

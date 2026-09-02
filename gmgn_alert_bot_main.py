@@ -126,6 +126,24 @@ def compute_rank(ratio: float) -> float:
     rank = RANK_LOW + (ratio - RANK_LOW_RATIO) / (RANK_HIGH_RATIO - RANK_LOW_RATIO) * (RANK_HIGH - RANK_LOW)
     return round(min(rank, RANK_HIGH), 1)
 
+
+def token_age_seconds(open_ts) -> float | None:
+    """Return token age in seconds for a valid Unix timestamp, else None."""
+    if open_ts is None:
+        return None
+    try:
+        open_ts = float(open_ts)
+    except (TypeError, ValueError):
+        return None
+    if open_ts <= 0:
+        return None
+    now = time.time()
+    if open_ts > now * 1000:
+        return None
+    if open_ts > now * 10:
+        open_ts /= 1000
+    return now - open_ts
+
 # ─────────────────────────────────────────────
 #  SCRAPER
 # ─────────────────────────────────────────────
@@ -223,6 +241,7 @@ def build_stats(token: dict) -> dict:
     volume    = token.get("volume") or 0
     liquidity = token.get("liquidity") or 0
     open_ts   = token.get("open_timestamp")
+    age_seconds = token_age_seconds(open_ts)
 
     vol_sma, readings = record_volume(address, volume)
     vol_ratio = (vol_sma / liquidity) if (vol_sma and liquidity) else 0.0
@@ -242,7 +261,7 @@ def build_stats(token: dict) -> dict:
         "dev_pct":    (token.get("dev_token_burn_ratio") or 0) * 100,
         "swaps":      token.get("swaps") or 0,
         "price_chg":  token.get("price_change_percent") or 0,
-        "age_days":   (time.time() - open_ts) / 86_400 if open_ts else None,
+        "age_days":   age_seconds / 86_400 if age_seconds is not None else None,
         "mintable":   token.get("mintable"),
         "is_migrated":token.get("is_migrated"),
         "burn_status":token.get("burn_status"),
@@ -265,11 +284,12 @@ def passes_filters(token: dict):
         log.debug("FAIL burnt | %s", sym); return False, s
 
     # Minimum token age
-    open_ts = token.get("open_timestamp")
-    if open_ts is not None:
-        age_minutes = (time.time() - open_ts) / 60
-        if age_minutes < MIN_TOKEN_AGE_MINUTES:
-            log.debug("FAIL too new=%.1fmin | %s", age_minutes, sym); return False, s
+    age_seconds = token_age_seconds(token.get("open_timestamp"))
+    if age_seconds is None:
+        log.debug("FAIL invalid age | %s", sym); return False, s
+    age_minutes = age_seconds / 60
+    if age_minutes < MIN_TOKEN_AGE_MINUTES:
+        log.debug("FAIL too new=%.1fmin | %s", age_minutes, sym); return False, s
 
     # Age
     if s["age_days"] is not None and not _in_range(s["age_days"], f["min_age_days"], f["max_age_days"]):

@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+gmgn_bot.log
+gmgn_bot_state.db

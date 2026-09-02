@@ -7,6 +7,7 @@ Run:    python gmgn_alert_bot.py
 
 import os
 import time
+import sqlite3
 import logging
 import random
 import threading
@@ -85,15 +86,156 @@ FILTERS = {
 }
 
 # ─────────────────────────────────────────────
-#  LOGGING
+#  LOGGING + PERSISTENCE
 # ─────────────────────────────────────────────
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_PATH = os.path.join(BASE_DIR, "gmgn_bot.log")
+STATE_DB_PATH = os.path.join(BASE_DIR, "gmgn_bot_state.db")
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_PATH, mode="a", encoding="utf-8"),
+    ],
 )
 log = logging.getLogger("gmgn_bot")
+
+
+def init_state_db() -> None:
+    """Create the persistence tables used for cooldown tracking and bot metrics."""
+    conn = sqlite3.connect(STATE_DB_PATH)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS alerted (
+            address TEXT PRIMARY KEY,
+            last_alert_ts REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS alert_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT NOT NULL,
+            symbol TEXT,
+            name TEXT,
+            title TEXT,
+            body TEXT,
+            rank REAL,
+            ratio REAL,
+            sma REAL,
+            sent_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS metrics (
+            name TEXT PRIMARY KEY,
+            value INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_alerted_state() -> dict[str, float]:
+    """Load the last alert timestamps from disk."""
+    conn = sqlite3.connect(STATE_DB_PATH)
+    rows = conn.execute("SELECT address, last_alert_ts FROM alerted").fetchall()
+    conn.close()
+    return {addr: float(ts) for addr, ts in rows}
+
+
+def save_alerted_state(alerted: dict[str, float]) -> None:
+    """Persist the current cooldown map to disk."""
+    conn = sqlite3.connect(STATE_DB_PATH)
+    conn.executemany(
+        "INSERT INTO alerted(address, last_alert_ts) VALUES(?, ?) "
+        "ON CONFLICT(address) DO UPDATE SET last_alert_ts = excluded.last_alert_ts",
+        [(addr, ts) for addr, ts in alerted.items()],
+    )
+    conn.commit()
+    conn.close()
+
+
+def prune_alerted_state(cutoff_ts: float) -> dict[str, float]:
+    """Delete stale alert entries older than the cutoff and return the remaining map."""
+    conn = sqlite3.connect(STATE_DB_PATH)
+    conn.execute("DELETE FROM alerted WHERE last_alert_ts <= ?", (cutoff_ts,))
+    rows = conn.execute("SELECT address, last_alert_ts FROM alerted").fetchall()
+    conn.commit()
+    conn.close()
+    return {addr: float(ts) for addr, ts in rows}
+
+
+def record_alert_history(token: dict, stats: dict, title: str, body: str) -> None:
+    """Persist a successful alert to the local SQLite history table."""
+    conn = sqlite3.connect(STATE_DB_PATH)
+    conn.execute(
+        """
+        INSERT INTO alert_history(address, symbol, name, title, body, rank, ratio, sma, sent_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            token.get("address", ""),
+            token.get("symbol", ""),
+            token.get("name") or token.get("symbol") or "",
+            title,
+            body,
+            stats.get("rank"),
+            stats.get("vol_ratio"),
+            stats.get("vol_sma"),
+            time.time(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def record_metric(name: str, value: int = 1) -> None:
+    """Track operational health metrics for monitoring and debugging."""
+    conn = sqlite3.connect(STATE_DB_PATH)
+    now = time.time()
+    row = conn.execute("SELECT value FROM metrics WHERE name = ?", (name,)).fetchone()
+    existing = int(row[0]) if row else 0
+    next_value = existing + value
+    conn.execute(
+        """
+        INSERT INTO metrics(name, value, updated_at)
+        VALUES(?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (name, next_value, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_metric_snapshot() -> dict[str, int]:
+    """Return all saved metrics for logging and diagnostics."""
+    conn = sqlite3.connect(STATE_DB_PATH)
+    rows = conn.execute("SELECT name, value FROM metrics ORDER BY name").fetchall()
+    conn.close()
+    return {name: int(value) for name, value in rows}
+
+
+def log_metric_summary() -> None:
+    """Log the most useful metrics from the SQLite state store."""
+    metrics = get_metric_snapshot()
+    if not metrics:
+        log.info("Metrics: no data yet")
+        return
+
+    summary = ", ".join(f"{k}={v}" for k, v in sorted(metrics.items()))
+    log.info("Metrics summary: %s", summary)
+
 
 # ─────────────────────────────────────────────
 #  VOLUME HISTORY
@@ -501,6 +643,7 @@ def input_listener():
 # ─────────────────────────────────────────────
 
 def main():
+    init_state_db()
     log.info("=" * 55)
     log.info("GMGN Alert Bot started")
     log.info("Chain: %s | Period: %s | Poll every %ds", CHAIN, TIME_PERIOD, POLL_INTERVAL)
@@ -510,18 +653,21 @@ def main():
     log.info("Filters: KOL >=%s | Smart >=%s | Min age %dmin | Max age %sd",
              FILTERS["min_kol"], FILTERS["min_smart"], MIN_TOKEN_AGE_MINUTES, FILTERS["max_age_days"])
     log.info("Cooldown: %dh per token", ALERT_COOLDOWN_MINUTES // 60)
+    log.info("State DB: %s", STATE_DB_PATH)
+    log.info("Log file: %s", LOG_PATH)
     log.info("Notifying: %s", NTFY_URL)
     log.info("Paste a token address + Enter to preview. Type 'quit' to stop.")
     log.info("=" * 55)
 
     threading.Thread(target=input_listener, daemon=True).start()
 
-    alerted: dict[str, float] = {}
+    alerted: dict[str, float] = load_alerted_state()
     cooldown_secs = ALERT_COOLDOWN_MINUTES * 60
 
     while True:
         try:
             tokens = fetch_trending()
+            record_metric("polls_total")
             alerts_this_cycle = 0
             near_misses = []
 
@@ -541,6 +687,9 @@ def main():
                 if passed:
                     if send_alert(token, stats):
                         alerted[address] = time.time()
+                        save_alerted_state(alerted)
+                        record_alert_history(token, stats, *format_notification(token, stats))
+                        record_metric("alerts_sent")
                         alerts_this_cycle += 1
                 else:
                     kol      = token.get("renowned_count") or 0
@@ -575,10 +724,13 @@ def main():
                         sym, sma, readings, VOL_SMA_PERIODS,
                         ratio, kol, smart, age_str, pchg, score
                     )
+                record_metric("cycles_no_alert")
 
             # Prune cooldown entries older than 24h
             cutoff = time.time() - 86_400
-            alerted = {k: v for k, v in alerted.items() if v > cutoff}
+            alerted = prune_alerted_state(cutoff)
+            save_alerted_state(alerted)
+            log_metric_summary()
 
             # Prune vol_history — keep entries that are still in trending OR were
             # recently debug-looked-up (give them 10 minutes grace)

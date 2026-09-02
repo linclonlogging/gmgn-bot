@@ -135,12 +135,44 @@ def build_scraper():
     s.headers.update({
         "Accept":          "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control":   "no-cache",
+        "Pragma":          "no-cache",
         "Referer":         "https://gmgn.ai/sol/token",
         "Origin":          "https://gmgn.ai",
     })
     return s
 
 SCRAPER = build_scraper()
+
+
+def warmup_scraper(scraper):
+    """Prime Cloudflare cookies before hitting the GMGN API."""
+    for url in ("https://gmgn.ai/", "https://gmgn.ai/sol/token"):
+        try:
+            scraper.get(url, timeout=20)
+        except Exception:
+            continue
+
+
+def is_cloudflare_403(resp) -> bool:
+    """Return True for the Cloudflare block page GMGN serves on 403."""
+    body = (getattr(resp, "text", "") or "").lower()
+    return resp.status_code == 403 and (
+        "cloudflare" in body or "attention required" in body or "blocked" in body
+    )
+
+
+def fetch_gmgn_rank(scraper, url: str, params: dict):
+    """Fetch the GMGN rank endpoint, retrying once after a warmup if blocked."""
+    resp = scraper.get(url, params=params, timeout=30)
+    if not is_cloudflare_403(resp):
+        return resp, scraper
+
+    log.warning("GMGN returned a Cloudflare 403 block page; refreshing session and retrying once")
+    scraper = build_scraper()
+    warmup_scraper(scraper)
+    resp = scraper.get(url, params=params, timeout=30)
+    return resp, scraper
 
 # ─────────────────────────────────────────────
 #  FETCH TRENDING
@@ -156,7 +188,8 @@ def fetch_trending() -> list[dict]:
     }
     time.sleep(random.uniform(1.5, 3.5))
     try:
-        resp = SCRAPER.get(url, params=params, timeout=30)
+        warmup_scraper(SCRAPER)
+        resp, SCRAPER = fetch_gmgn_rank(SCRAPER, url, params)
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
